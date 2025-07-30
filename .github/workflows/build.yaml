@@ -69,16 +69,20 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       
-      - name: Install dependencies
+      - name: Initial MSYS2 update (non-interactive)
         run: |
-          pacman -Syu --noconfirm --needed --noprogressbar \
+          # 第一次更新时不升级 pacman
+          pacman --noconfirm -Syuu --ignore=pacman
+          pacman --noconfirm -S --needed --noprogressbar \
             ${MINGW_PACKAGE_PREFIX}-gcc \
             ${MINGW_PACKAGE_PREFIX}-ninja \
             ${MINGW_PACKAGE_PREFIX}-cmake \
             ${MINGW_PACKAGE_PREFIX}-curl \
             ${MINGW_PACKAGE_PREFIX}-toolchain \
             unzip
-
+      
+      - name: Install mpv and cv2pdb
+        run: |
           curl -LO https://github.com/xfangfang/wiliwili/releases/download/v0.1.0/${MINGW_PACKAGE_PREFIX}-mpv-0.39.0-4-any.pkg.tar.zst
           pacman -U --noconfirm *.pkg.tar.zst
 
