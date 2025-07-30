@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 env:
-  BUILD_DIR: "_build"
-  MSYS2_ROOT: "C:/msys64"
+  BUILD_DIR: _build
+  MSYS2_PATH: C:/msys64
 
 jobs:
   build:
@@ -16,63 +16,54 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # 1. 检出代码
+      # 1. Checkout code
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2. 初始化MSYS2（安全模式）
-      - name: Setup MSYS2
+      # 2. Setup MSYS2 (safe mode)
+      - name: Configure MSYS2
         shell: cmd
         run: |
           reg add "HKLM\SOFTWARE\MSYS2" /v "DisableAutoUpdate" /t REG_DWORD /d 1 /f
-          echo "MSYS2 initialized"
+          echo "MSYS2 configured"
 
-      # 3. 安装依赖（静默模式）
-      - name: Install dependencies
-        shell: ${{ env.MSYS2_ROOT }}/usr/bin/bash -l {0}
+      # 3. Install dependencies
+      - name: Install tools
+        shell: bash
         run: |
+          echo "Using MSYS2 at ${{ env.MSYS2_PATH }}"
           pacman -Syu --noconfirm --needed --noprogressbar \
             mingw-w64-x86_64-gcc \
             mingw-w64-x86_64-ninja \
             mingw-w64-x86_64-curl \
-            mingw-w64-x86_64-mpv \
-            > /dev/null 2>&1
+            mingw-w64-x86_64-mpv
 
-      # 4. 配置构建
-      - name: Configure CMake
+      # 4. Configure build
+      - name: Run CMake
         shell: bash
         run: |
-          cmake -B "${{ env.BUILD_DIR }}" -G Ninja \
+          cmake -B ${{ env.BUILD_DIR }} -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DUSE_SYSTEM_CURL=ON
 
-      # 5. 并行编译
-      - name: Build
+      # 5. Build project
+      - name: Compile
         shell: bash
         run: |
-          cmake --build "${{ env.BUILD_DIR }}" --parallel $(nproc)
+          cmake --build ${{ env.BUILD_DIR }} --parallel $(nproc)
 
-      # 6. 收集运行时依赖
-      - name: Collect DLLs
+      # 6. Prepare artifacts
+      - name: Package
         shell: bash
         run: |
-          # 确保使用完整路径
-          MSYS2_BIN="${{ env.MSYS2_ROOT }}/mingw64/bin"
-          cp "$MSYS2_BIN/libcurl-4.dll" "${{ env.BUILD_DIR }}/"
-          cp "$MSYS2_BIN/libmpv-2.dll" "${{ env.BUILD_DIR }}/"
-          cp "$MSYS2_BIN/zlib1.dll" "${{ env.BUILD_DIR }}/"
+          mkdir -p dist
+          cp ${{ env.BUILD_DIR }}/wiliwili.exe dist/
+          cp ${{ env.MSYS2_PATH }}/mingw64/bin/libcurl-4.dll dist/
+          cp ${{ env.MSYS2_PATH }}/mingw64/bin/libmpv-2.dll dist/
+          zip -j wiliwili-win64.zip dist/*
 
-      # 7. 打包发布
-      - name: Create package
-        shell: bash
-        run: |
-          mkdir -p package
-          cp "${{ env.BUILD_DIR }}/wiliwili.exe" package/
-          cp "${{ env.BUILD_DIR }}"/*.dll package/
-          7z a wiliwili-win64.zip package/*
-
-      # 8. 上传产物
+      # 7. Upload artifacts
       - uses: actions/upload-artifact@v3
         with:
           name: wiliwili-win64
