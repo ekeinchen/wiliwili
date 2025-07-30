@@ -122,7 +122,7 @@ jobs:
 
   build-win:
     needs: [ version ]
-    runs-on: windows-2019
+    runs-on: windows-2022  # 修改运行环境为 windows-2022
     strategy:
       fail-fast: false
       matrix:
