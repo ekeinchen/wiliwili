@@ -1,90 +1,107 @@
-name: Ultra-Fast Windows Build
+name: Windows Build (x64)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   pull_request:
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests'
+        type: boolean
+        default: true
 
 env:
-  MSYS2_ROOT: C:/msys64
-  BUILD_DIR: build
+  BUILD_DIR: "_build"
+  MSYS2_ROOT: "C:/msys64"
 
 jobs:
-  build:
+  setup:
     runs-on: windows-2022
-    timeout-minutes: 12  # 强制超时限制
-
+    outputs:
+      cache-key: ${{ steps.setup-cache.outputs.cache-key }}
     steps:
-      # 1. 智能代码检出（禁用自动换行处理）
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 1  # 加速git操作
-          lfs: true
+          fetch-depth: 0
 
-      # 2. 安全初始化MSYS2（完全绕过pacman升级）
-      - name: Setup MSYS2 (No Upgrade)
+      - name: Generate cache key
+        id: setup-cache
+        run: echo "cache-key=${{ github.sha }}-${{ hashFiles('CMakeLists.txt') }}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    runs-on: windows-2022
+    timeout-minutes: 12
+
+    steps:
+      # 1. 智能缓存恢复
+      - uses: actions/cache@v3
+        id: build-cache
+        with:
+          path: |
+            ${{ env.BUILD_DIR }}
+            ${{ env.MSYS2_ROOT }}/var/cache/pacman/pkg/
+          key: ${{ runner.os }}-${{ needs.setup.outputs.cache-key }}
+
+      # 2. 安全初始化MSYS2
+      - name: Configure MSYS2
+        if: steps.build-cache.outputs.cache-hit != 'true'
         shell: cmd
         run: |
-          :: 通过注册表禁用MSYS2自动升级
           reg add "HKLM\SOFTWARE\MSYS2" /v "DisableAutoUpdate" /t REG_DWORD /d 1 /f
-          echo "::set-env name=MSYS2_DISABLE_AUTOUPDATE::1"
+          echo "MSYS2 initialized" > nul
 
-      # 3. 极简依赖安装（仅必要组件）
-      - name: Install Minimal Dependencies
+      # 3. 极简依赖安装
+      - name: Install dependencies
+        if: steps.build-cache.outputs.cache-hit != 'true'
         shell: ${{ env.MSYS2_ROOT }}/usr/bin/bash -l {0}
         run: |
-          # 静默安装核心工具链
-          pacman -S --needed --noconfirm --noprogressbar \
+          pacman -Syu --noconfirm --needed --noprogressbar \
             mingw-w64-x86_64-gcc \
             mingw-w64-x86_64-ninja \
             mingw-w64-x86_64-curl \
             mingw-w64-x86_64-mpv \
             > /dev/null 2>&1
 
-          # 预下载关键DLL到构建目录
-          curl -sLO https://dl.example.com/wiliwili-dlls-2024.zip
-          unzip -q -o wiliwili-dlls-2024.zip -d $BUILD_DIR
-
-      # 4. 高速缓存配置
-      - name: Cache Dependencies
-        uses: actions/cache@v3
-        with:
-          path: |
-            ${{ env.BUILD_DIR }}
-            ${{ env.MSYS2_ROOT }}/var/cache/pacman/pkg/
-          key: ${{ runner.os }}-ultrafast-${{ hashFiles('CMakeLists.txt') }}
-
-      # 5. 并行化构建
-      - name: Build (Multi-Thread)
+      # 4. 构建配置
+      - name: Configure CMake
         shell: bash
         run: |
           cmake -B $BUILD_DIR -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DENABLE_UNITY_BUILD=ON \
-            -DUSE_PRECOMPILED_DEPS=ON \
-            -DCMAKE_CXX_FLAGS="/MP /Zi"  # MSVC多核编译+调试信息
+            -DBUILD_TESTING=${{ !inputs.skip_tests }} \
+            -DUSE_SYSTEM_CURL=ON \
+            -DENABLE_CCACHE=ON
 
-          cmake --build $BUILD_DIR --parallel $(nproc)
-
-      # 6. 自动化依赖收集
-      - name: Collect Runtime Dependencies
+      # 5. 并行编译
+      - name: Build
         shell: bash
         run: |
-          # 使用objdump快速分析依赖（比ntldd快3倍）
-          objdump -p $BUILD_DIR/wiliwili.exe | grep 'DLL Name:' | awk '{print $3}' | while read -r dll; do
-            find $MSYS2_ROOT -name "$dll" -exec cp {} $BUILD_DIR/ \;
+          cmake --build $BUILD_DIR --parallel $(nproc)
+
+      # 6. 依赖收集
+      - name: Collect DLLs
+        shell: bash
+        run: |
+          # 使用混合方案确保完整
+          objdump -p $BUILD_DIR/wiliwili.exe | grep 'DLL Name:' | awk '{print $3}' | sort -u > dlls.txt
+          cat dlls.txt | while read dll; do
+            find $MSYS2_ROOT -iname "$dll" -exec cp {} $BUILD_DIR/ \;
           done
 
-      # 7. 智能打包（压缩比优化）
-      - name: Create Optimized Package
+      # 7. 生成发布包
+      - name: Create package
+        shell: bash
         run: |
-          7z a -mx9 -mmt4 wiliwili-${{ github.sha }}.zip $BUILD_DIR/*.{exe,pdb,dll}
+          mkdir -p package
+          cp $BUILD_DIR/wiliwili.{exe,pdb} package/
+          cp $BUILD_DIR/*.dll package/
+          7z a -mx9 wiliwili-${{ github.sha }}.zip package/*
 
-      # 8. 快速上传（分块传输）
+      # 8. 上传结果
       - uses: actions/upload-artifact@v3
         with:
-          name: wiliwili-bin
+          name: wiliwili-windows-x64
           path: wiliwili-${{ github.sha }}.zip
-          compression-level: 0  # 已预压缩
