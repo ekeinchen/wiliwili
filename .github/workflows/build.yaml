@@ -69,18 +69,27 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       
-      - name: Install dependencies (stage 1)
+      - name: Install dependencies
         run: |
-          # 第一阶段：基础更新（不升级pacman）
-          pacman --noconfirm -Syuu --ignore=pacman
+          # 禁用升级确认和组包安装提示
+          echo "Disable pacman confirmations..."
+          sed -i 's/^#CheckSpace/CheckSpace/' /etc/pacman.conf
+          sed -i 's/^#VerbosePkgLists/VerbosePkgLists/' /etc/pacman.conf
+          echo -e "\n[options]\nDisableDownloadTimeout\nNoProgressBar\n" >> /etc/pacman.conf
+          
+          # 第一阶段：安全更新（不升级核心包）
+          pacman --noconfirm -Syuu --ignore=msys2-runtime,mingw-w64-x86_64-toolchain
+          
+          # 安装必要工具（使用正确的ntldd包名）
           pacman --noconfirm -S --needed --noprogressbar \
             ${MINGW_PACKAGE_PREFIX}-gcc \
             ${MINGW_PACKAGE_PREFIX}-ninja \
             ${MINGW_PACKAGE_PREFIX}-cmake \
             ${MINGW_PACKAGE_PREFIX}-curl \
             ${MINGW_PACKAGE_PREFIX}-toolchain \
+            ${MINGW_PACKAGE_PREFIX}-binutils \  # 包含ntldd的替代工具
             unzip \
-            ntldd
+            ${MINGW_PACKAGE_PREFIX}-ntldd-git  # 正确的ntldd包名
       
       - name: Install mpv and cv2pdb
         run: |
@@ -125,6 +134,10 @@ jobs:
           
           cmake --build build
           
+          # 使用正确的ntldd路径检查依赖
+          echo "=== 依赖检查 ==="
+          /usr/bin/ntldd -R build/wiliwili.exe || true
+          
           # 复制所有必需的DLL
           DEPENDENCIES=(
             libcurl-4.dll libmpv-2.dll zlib1.dll 
@@ -136,15 +149,13 @@ jobs:
           for dll in "${DEPENDENCIES[@]}"; do
             if [ -f "${MINGW_PREFIX}/bin/${dll}" ]; then
               cp -v "${MINGW_PREFIX}/bin/${dll}" build/
+            else
+              echo "警告: 未找到 ${dll}"
             fi
           done
           
           # 生成PDB文件
           cv2pdb64 build/wiliwili.exe
-          
-          # 验证依赖
-          echo "=== 依赖检查 ==="
-          ntldd -R build/wiliwili.exe || true
           
           # 准备文档
           cp -a README.md build/
@@ -175,16 +186,8 @@ jobs:
           # 复制文件
           find . -name "${{ needs.version.outputs.DIST_EXE }}*" -type d -exec cp -r {}/wiliwili.exe {}/wiliwili.pdb {}/README.md {}/lib*.dll "${RELEASE_DIR}/" \;
           
-          # 添加必要的运行时文件
-          echo "[Paths]" > "${RELEASE_DIR}/qt.conf"
-          echo "Prefix=." >> "${RELEASE_DIR}/qt.conf"
-          
           # 创建ZIP包
           zip -r "${RELEASE_DIR}.zip" "${RELEASE_DIR}"
-          
-          # 验证包内容
-          echo "=== 发布包内容 ==="
-          unzip -l "${RELEASE_DIR}.zip"
       
       - name: Upload Release
         uses: ncipollo/release-action@v1
