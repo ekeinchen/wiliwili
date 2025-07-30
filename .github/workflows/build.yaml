@@ -69,9 +69,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       
-      - name: Initial MSYS2 update (non-interactive)
+      - name: Install dependencies (stage 1)
         run: |
-          # 第一次更新时不升级 pacman
+          # 第一阶段：基础更新（不升级pacman）
           pacman --noconfirm -Syuu --ignore=pacman
           pacman --noconfirm -S --needed --noprogressbar \
             ${MINGW_PACKAGE_PREFIX}-gcc \
@@ -79,7 +79,8 @@ jobs:
             ${MINGW_PACKAGE_PREFIX}-cmake \
             ${MINGW_PACKAGE_PREFIX}-curl \
             ${MINGW_PACKAGE_PREFIX}-toolchain \
-            unzip
+            unzip \
+            ntldd
       
       - name: Install mpv and cv2pdb
         run: |
@@ -100,6 +101,7 @@ jobs:
       
       - name: Build
         run: |
+          # 设置构建环境
           export CURL_INCLUDE_DIR=${MINGW_PREFIX}/include
           export CURL_LIBRARY=${MINGW_PREFIX}/lib/libcurl.a
           
@@ -122,8 +124,30 @@ jobs:
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
           
           cmake --build build
+          
+          # 复制所有必需的DLL
+          DEPENDENCIES=(
+            libcurl-4.dll libmpv-2.dll zlib1.dll 
+            libssl-3.dll libcrypto-3.dll libbrotlicommon.dll
+            libnghttp2-14.dll libidn2-0.dll libpsl-5.dll
+            libunistring-2.dll libiconv-2.dll libffi-7.dll
+          )
+          
+          for dll in "${DEPENDENCIES[@]}"; do
+            if [ -f "${MINGW_PREFIX}/bin/${dll}" ]; then
+              cp -v "${MINGW_PREFIX}/bin/${dll}" build/
+            fi
+          done
+          
+          # 生成PDB文件
           cv2pdb64 build/wiliwili.exe
-          cp -a README.md build
+          
+          # 验证依赖
+          echo "=== 依赖检查 ==="
+          ntldd -R build/wiliwili.exe || true
+          
+          # 准备文档
+          cp -a README.md build/
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -132,6 +156,7 @@ jobs:
           path: |
             build/wiliwili.exe
             build/wiliwili.pdb
+            build/*.dll
             build/README.md
 
   release:
@@ -141,16 +166,31 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
       
-      - name: Package executable
+      - name: Create release package
         run: |
-          zip -r -9 ${{ needs.version.outputs.DIST_EXE }}-x86_64.zip ${{ needs.version.outputs.DIST_EXE }}-d3d-x86_64
-
-      - name: Create Release
+          # 创建标准化发布包
+          RELEASE_DIR="wiliwili-${{ needs.version.outputs.version }}-win64"
+          mkdir -p "${RELEASE_DIR}"
+          
+          # 复制文件
+          find . -name "${{ needs.version.outputs.DIST_EXE }}*" -type d -exec cp -r {}/wiliwili.exe {}/wiliwili.pdb {}/README.md {}/lib*.dll "${RELEASE_DIR}/" \;
+          
+          # 添加必要的运行时文件
+          echo "[Paths]" > "${RELEASE_DIR}/qt.conf"
+          echo "Prefix=." >> "${RELEASE_DIR}/qt.conf"
+          
+          # 创建ZIP包
+          zip -r "${RELEASE_DIR}.zip" "${RELEASE_DIR}"
+          
+          # 验证包内容
+          echo "=== 发布包内容 ==="
+          unzip -l "${RELEASE_DIR}.zip"
+      
+      - name: Upload Release
         uses: ncipollo/release-action@v1
         with:
           name: wiliwili ${{ github.event.inputs.version }}
           tag: ${{ github.event.inputs.version }}
-          omitBodyDuringUpdate: true
           body: Windows 64-bit build of wiliwili
           token: ${{ secrets.GITHUB_TOKEN }}
-          artifacts: ${{ needs.version.outputs.DIST_EXE }}-x86_64.zip
+          artifacts: wiliwili-${{ needs.version.outputs.version }}-win64.zip
