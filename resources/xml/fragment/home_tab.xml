@@ -8,11 +8,6 @@
             disableNavigationRight="true"
             sidebarPosition="top">
 
-        <Tab label="@i18n/wiliwili/home/live/tab"
-             fontSize="22">
-            <HomeLive/>
-        </Tab>
-
         <Tab label="@i18n/wiliwili/home/rcmd/tab"
              fontSize="22">
             <HomeRecommends/>
