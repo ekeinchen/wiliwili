@@ -14,12 +14,6 @@ jobs:
     outputs:
       VERSION: ${{ steps.version.outputs.VERSION }}
       DIST_EXE: ${{ steps.version.outputs.DIST_EXE }}
-      DIST_NRO: ${{ steps.version.outputs.DIST_NRO }}
-      DIST_INTEL_DMG: ${{ steps.version.outputs.DIST_INTEL_DMG }}
-      DIST_ARM_DMG: ${{ steps.version.outputs.DIST_ARM_DMG }}
-      DIST_UNIVERSAL_DMG: ${{ steps.version.outputs.DIST_UNIVERSAL_DMG }}
-      DIST_FLATPAK_X86_64: ${{ steps.version.outputs.DIST_FLATPAK_X86_64 }}
-      DIST_UWP: ${{ steps.version.outputs.DIST_UWP }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,23 +23,10 @@ jobs:
       - name: Get version
         id: version
         run: |
-          # 这里需要根据实际情况获取版本号
           VERSION=$(git describe --tags --always)
           DIST_EXE="wiliwili"
-          DIST_NRO="wiliwili-nro"
-          DIST_INTEL_DMG="wiliwili-intel"
-          DIST_ARM_DMG="wiliwili-arm"
-          DIST_UNIVERSAL_DMG="wiliwili-universal"
-          DIST_FLATPAK_X86_64="wiliwili-flatpak-x86_64"
-          DIST_UWP="wiliwili-uwp"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "DIST_EXE=$DIST_EXE" >> $GITHUB_OUTPUT
-          echo "DIST_NRO=$DIST_NRO" >> $GITHUB_OUTPUT
-          echo "DIST_INTEL_DMG=$DIST_INTEL_DMG" >> $GITHUB_OUTPUT
-          echo "DIST_ARM_DMG=$DIST_ARM_DMG" >> $GITHUB_OUTPUT
-          echo "DIST_UNIVERSAL_DMG=$DIST_UNIVERSAL_DMG" >> $GITHUB_OUTPUT
-          echo "DIST_FLATPAK_X86_64=$DIST_FLATPAK_X86_64" >> $GITHUB_OUTPUT
-          echo "DIST_UWP=$DIST_UWP" >> $GITHUB_OUTPUT
 
   build-win:
     needs: [ version ]
@@ -94,11 +75,49 @@ jobs:
         run: |
           BRLS_GLFW=library/borealis/library/lib/extern/glfw
           cmake -P ${BRLS_GLFW}/CMake/GenerateMappings.cmake ${BRLS_GLFW}/src/mappings.h.in ${BRLS_GLFW}/src/mappings.h
+      - name: Build dependency
+        run: |
+          curl -sL https://github.com/webmproject/libwebp/archive/v1.4.0.tar.gz | tar zxf - -C /tmp
+          cd /tmp/libwebp-1.4.0
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=${MINGW_PREFIX} \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DWEBP_BUILD_ANIM_UTILS=OFF \
+            -DWEBP_BUILD_CWEBP=OFF \
+            -DWEBP_BUILD_DWEBP=OFF \
+            -DWEBP_BUILD_GIF2WEBP=OFF \
+            -DWEBP_BUILD_IMG2WEBP=OFF \
+            -DWEBP_BUILD_VWEBP=OFF \
+            -DWEBP_BUILD_WEBPINFO=OFF \
+            -DWEBP_BUILD_WEBPMUX=OFF \
+            -DWEBP_BUILD_LIBWEBPMUX=OFF \
+            -DWEBP_BUILD_EXTRAS=OFF
+          cmake --build build
+          cmake --install build
+
+          curl -sL https://curl.se/download/curl-8.7.1.tar.xz | tar Jxf - -C /tmp
+          cd /tmp/curl-8.7.1
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=${MINGW_PREFIX} \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DHTTP_ONLY=ON \
+            -DCURL_USE_SCHANNEL=ON \
+            -DCURL_DISABLE_PROGRESS_METER=ON \
+            -DBUILD_CURL_EXE=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_LIBCURL_DOCS=OFF \
+            -DUSE_LIBIDN2=OFF \
+            -DUSE_WIN32_IDN=ON \
+            -DCURL_USE_LIBSSH2=OFF \
+            -DCURL_USE_LIBPSL=OFF \
+            -DZLIB_USE_STATIC_LIBS=ON
+          cmake --build build
+          cmake --install build
       - name: Build
         run: |
-          mkdir -p build
-          cd build
-          cmake .. \
+          cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DPLATFORM_DESKTOP=ON \
             -DWIN32_TERMINAL=OFF \
@@ -110,9 +129,9 @@ jobs:
             -DMPV_BUNDLE_DLL=${MINGW_PREFIX}/bin/libmpv-2.dll \
             -DVERSION_BUILD=${{ github.run_number }} \
             ${{ matrix.cmake }}
-          cmake --build .
-          cv2pdb64 wiliwili.exe
-          cp -a ../README.md .
+          cmake --build build
+          cv2pdb64 build/wiliwili.exe
+          cp -a README.md build
       - name: Upload dist
         uses: actions/upload-artifact@v4
         with:
@@ -121,3 +140,28 @@ jobs:
             build/wiliwili.exe
             build/wiliwili.pdb
             build/README.md
+
+  release:
+    needs: [ build-win, version ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Package exe
+        if: github.event.inputs.release == 'true' && !cancelled()
+        run: |
+          tree
+          zip -r -9 ${{ needs.version.outputs.DIST_EXE }}-x86_64.zip ${{ needs.version.outputs.DIST_EXE }}-d3d-x86_64
+          zip -r -9 ${{ needs.version.outputs.DIST_EXE }}-x86.zip ${{ needs.version.outputs.DIST_EXE }}-d3d-x86
+      - name: Upload Release
+        if: github.event.inputs.release == 'true' && !cancelled()
+        uses: ncipollo/release-action@v1
+        with:
+          name: wiliwili ${{  github.event.inputs.version }}
+          tag: ${{  github.event.inputs.version }}
+          omitBodyDuringUpdate: true
+          body: This release is built by github-action.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
+          artifacts: >
+            ${{ needs.version.outputs.DIST_EXE }}-x86_64.zip
+            ${{ needs.version.outputs.DIST_EXE }}-x86.zip
