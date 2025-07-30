@@ -1,61 +1,35 @@
-name: Windows Build (x64)
+name: Windows 64-bit Build
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main ]
   pull_request:
   workflow_dispatch:
-    inputs:
-      skip_tests:
-        description: 'Skip tests'
-        type: boolean
-        default: true
 
 env:
   BUILD_DIR: "_build"
   MSYS2_ROOT: "C:/msys64"
 
 jobs:
-  setup:
+  build:
     runs-on: windows-2022
-    outputs:
-      cache-key: ${{ steps.setup-cache.outputs.cache-key }}
+    timeout-minutes: 15
+
     steps:
+      # 1. 检出代码
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      - name: Generate cache key
-        id: setup-cache
-        run: echo "cache-key=${{ github.sha }}-${{ hashFiles('CMakeLists.txt') }}" >> $GITHUB_OUTPUT
-
-  build:
-    needs: setup
-    runs-on: windows-2022
-    timeout-minutes: 12
-
-    steps:
-      # 1. 智能缓存恢复
-      - uses: actions/cache@v3
-        id: build-cache
-        with:
-          path: |
-            ${{ env.BUILD_DIR }}
-            ${{ env.MSYS2_ROOT }}/var/cache/pacman/pkg/
-          key: ${{ runner.os }}-${{ needs.setup.outputs.cache-key }}
-
-      # 2. 安全初始化MSYS2
-      - name: Configure MSYS2
-        if: steps.build-cache.outputs.cache-hit != 'true'
+      # 2. 初始化MSYS2（安全模式）
+      - name: Setup MSYS2
         shell: cmd
         run: |
           reg add "HKLM\SOFTWARE\MSYS2" /v "DisableAutoUpdate" /t REG_DWORD /d 1 /f
-          echo "MSYS2 initialized" > nul
+          echo "MSYS2 initialized"
 
-      # 3. 极简依赖安装
+      # 3. 安装依赖（静默模式）
       - name: Install dependencies
-        if: steps.build-cache.outputs.cache-hit != 'true'
         shell: ${{ env.MSYS2_ROOT }}/usr/bin/bash -l {0}
         run: |
           pacman -Syu --noconfirm --needed --noprogressbar \
@@ -65,43 +39,41 @@ jobs:
             mingw-w64-x86_64-mpv \
             > /dev/null 2>&1
 
-      # 4. 构建配置
+      # 4. 配置构建
       - name: Configure CMake
         shell: bash
         run: |
-          cmake -B $BUILD_DIR -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DBUILD_TESTING=${{ !inputs.skip_tests }} \
-            -DUSE_SYSTEM_CURL=ON \
-            -DENABLE_CCACHE=ON
+          cmake -B "${{ env.BUILD_DIR }}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_SYSTEM_CURL=ON
 
       # 5. 并行编译
       - name: Build
         shell: bash
         run: |
-          cmake --build $BUILD_DIR --parallel $(nproc)
+          cmake --build "${{ env.BUILD_DIR }}" --parallel $(nproc)
 
-      # 6. 依赖收集
+      # 6. 收集运行时依赖
       - name: Collect DLLs
         shell: bash
         run: |
-          # 使用混合方案确保完整
-          objdump -p $BUILD_DIR/wiliwili.exe | grep 'DLL Name:' | awk '{print $3}' | sort -u > dlls.txt
-          cat dlls.txt | while read dll; do
-            find $MSYS2_ROOT -iname "$dll" -exec cp {} $BUILD_DIR/ \;
-          done
+          # 确保使用完整路径
+          MSYS2_BIN="${{ env.MSYS2_ROOT }}/mingw64/bin"
+          cp "$MSYS2_BIN/libcurl-4.dll" "${{ env.BUILD_DIR }}/"
+          cp "$MSYS2_BIN/libmpv-2.dll" "${{ env.BUILD_DIR }}/"
+          cp "$MSYS2_BIN/zlib1.dll" "${{ env.BUILD_DIR }}/"
 
-      # 7. 生成发布包
+      # 7. 打包发布
       - name: Create package
         shell: bash
         run: |
           mkdir -p package
-          cp $BUILD_DIR/wiliwili.{exe,pdb} package/
-          cp $BUILD_DIR/*.dll package/
-          7z a -mx9 wiliwili-${{ github.sha }}.zip package/*
+          cp "${{ env.BUILD_DIR }}/wiliwili.exe" package/
+          cp "${{ env.BUILD_DIR }}"/*.dll package/
+          7z a wiliwili-win64.zip package/*
 
-      # 8. 上传结果
+      # 8. 上传产物
       - uses: actions/upload-artifact@v3
         with:
-          name: wiliwili-windows-x64
-          path: wiliwili-${{ github.sha }}.zip
+          name: wiliwili-win64
+          path: wiliwili-win64.zip
