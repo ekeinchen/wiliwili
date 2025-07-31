@@ -1,53 +1,199 @@
-name: 构建 wiliwili (Windows 64位)
+name: Build wiliwili (Windows 64-bit with all DLLs)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Push a new release'
+        required: false
+        default: 'false'
+      version:
+        description: 'Version'
+        required: false
+        default: '0.0.0'
+      disable_unity_build:
+        description: 'Disable unity build'
+        required: false
+        default: 'false'
 
 jobs:
-  build-win:
-    runs-on: windows-2022
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+      DIST_EXE: ${{ steps.info.outputs.DIST_EXE }}
     steps:
-      - name: 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: 设置MSYS2环境
-        shell: cmd
+      - name: Debug version
         run: |
-          choco install msys2 -y --params="/NoUpdate"
-          set PATH=C:\msys64\usr\bin;%PATH%
-          pacman -Syu --noconfirm
-          pacman -S --needed --noconfirm \
-            mingw-w64-x86_64-toolchain \
-            mingw-w64-x86_64-cmake \
-            mingw-w64-x86_64-ninja
+          export VERSION=$(git rev-parse --short HEAD)
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: 构建项目
-        shell: cmd
+      - name: Release version
+        if: github.event.inputs.release == 'true' && github.event.inputs.release != 'false' && !cancelled()
         run: |
-          mkdir build
-          cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build .
+          export VERSION="${{ github.event.inputs.version }}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: 准备发布文件
-        shell: cmd
+      - name: Version
+        id: info
+        env:
+          VERSION: ${{ env.VERSION }}
         run: |
-          mkdir dist
-          copy build\wiliwili.exe dist\
-          copy build\*.dll dist\ || echo "没有DLL文件需要复制"
-          dir dist
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "DIST_EXE=wiliwili-Windows-${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: 强制验证制品
-        shell: cmd
+  build-win:
+    needs: [ version ]
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, msystem: MINGW64, driver: d3d, cmake: "-DUSE_D3D11=ON" }
+    env:
+      MSYSTEM: ${{ matrix.msystem }}
+      MSYS2_PATH_TYPE: inherit
+    defaults:
+      run:
+        shell: C:\shells\msys2bash.cmd {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      
+      - name: Setup MSYS2
         run: |
-          if not exist "dist\wiliwili.exe" (
-            echo "::error::可执行文件未生成!"
-            exit 1
+          pacman --noconfirm -Syuu --ignore=pacman
+          pacman --noconfirm -S --needed --noprogressbar \
+            ${MINGW_PACKAGE_PREFIX}-gcc \
+            ${MINGW_PACKAGE_PREFIX}-ninja \
+            ${MINGW_PACKAGE_PREFIX}-cmake \
+            ${MINGW_PACKAGE_PREFIX}-curl \
+            ${MINGW_PACKAGE_PREFIX}-toolchain \
+            ${MINGW_PACKAGE_PREFIX}-ntldd-git \
+            ${MINGW_PACKAGE_PREFIX}-openssl \
+            ${MINGW_PACKAGE_PREFIX}-libcurl \
+            unzip
+      
+      - name: Install dependencies
+        run: |
+          # 安装mpv
+          curl -LO https://github.com/xfangfang/wiliwili/releases/download/v0.1.0/${MINGW_PACKAGE_PREFIX}-mpv-0.39.0-4-any.pkg.tar.zst
+          pacman -U --noconfirm *.pkg.tar.zst
+
+          # 安装cv2pdb
+          curl -LO https://github.com/rainers/cv2pdb/releases/download/v0.52/cv2pdb-0.52.zip
+          unzip cv2pdb-0.52.zip cv2pdb64.exe -d /usr/bin
+      
+      - name: Patch tweeny CMakeLists
+        run: |
+          sed -i 's/cmake_minimum_required(VERSION 2.8)/cmake_minimum_required(VERSION 3.5)/' library/borealis/library/lib/extern/tweeny/CMakeLists.txt
+      
+      - name: Update gamepad db
+        run: |
+          BRLS_GLFW=library/borealis/library/lib/extern/glfw
+          cmake -P ${BRLS_GLFW}/CMake/GenerateMappings.cmake ${BRLS_GLFW}/src/mappings.h.in ${BRLS_GLFW}/src/mappings.h
+      
+      - name: Build
+        run: |
+          export CURL_INCLUDE_DIR=${MINGW_PREFIX}/include
+          export CURL_LIBRARY=${MINGW_PREFIX}/lib/libcurl.a
+          
+          cmake -B build -G Ninja ${{ matrix.cmake }} \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPLATFORM_DESKTOP=ON \
+            -DWIN32_TERMINAL=OFF \
+            -DUSE_SYSTEM_CURL=ON \
+            -DCPR_FORCE_WINSSL_BACKEND=OFF \
+            -DCPR_USE_SYSTEM_CURL=ON \
+            -DCURL_INCLUDE_DIR=${CURL_INCLUDE_DIR} \
+            -DCURL_LIBRARY=${CURL_LIBRARY} \
+            -DUSE_LIBROMFS=ON \
+            -DBRLS_UNITY_BUILD=${{ github.event.inputs.disable_unity_build == 'true' && 'OFF' || 'ON' }} \
+            -DCMAKE_UNITY_BUILD_BATCH_SIZE=20 \
+            -DZLIB_USE_STATIC_LIBS=ON \
+            -DMPV_BUNDLE_DLL=${MINGW_PREFIX}/bin/libmpv-2.dll \
+            -DVERSION_BUILD=${{ github.run_number }} \
+            -DCMAKE_POLICY_DEFAULT_CMP0048=NEW \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          
+          cmake --build build
+          cv2pdb64 build/wiliwili.exe
+      
+      - name: Collect all DLLs
+        run: |
+          mkdir -p dist
+          cp build/wiliwili.exe dist/
+          cp build/wiliwili.pdb dist/
+          cp README.md dist/
+
+          # 核心依赖
+          CORE_DLLS=(
+            libcurl-4.dll libcrypto-3-x64.dll libssl-3-x64.dll
+            libbrotlidec.dll libbrotlicommon.dll libiconv-2.dll
+            libidn2-0.dll libintl-8.dll libunistring-5.dll
+            libnghttp2-14.dll libnghttp3-9.dll libngtcp2-16.dll
+            libngtcp2_crypto_ossl.dll libpsl-5.dll libssh2-1.dll
+            libzstd.dll zlib1.dll libmpv-2.dll
+            libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
           )
-          echo "验证通过，找到可执行文件"
 
-      - name: 上传制品
+          for dll in "${CORE_DLLS[@]}"; do
+            if [ -f "${MINGW_PREFIX}/bin/${dll}" ]; then
+              cp "${MINGW_PREFIX}/bin/${dll}" dist/
+            else
+              echo "::warning::DLL not found: ${dll}"
+            fi
+          done
+
+          # 添加CA证书以解决TLS证书验证问题
+          curl -LO https://curl.se/ca/cacert.pem
+          cp cacert.pem dist/
+
+          # 额外验证
+          if ! [ -f "dist/libcurl-4.dll" ]; then
+            echo "::error::libcurl-4.dll is missing!"
+            exit 1
+          fi
+
+          # 验证OpenSSL DLLs
+          if ! [ -f "dist/libcrypto-3-x64.dll" ] || ! [ -f "dist/libssl-3-x64.dll" ]; then
+            echo "::error::OpenSSL DLLs are missing!"
+            exit 1
+          fi
+      
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wiliwili-build
+          name: ${{ needs.version.outputs.DIST_EXE }}-${{ matrix.driver }}-${{ matrix.arch }}-full
           path: dist/*
-          if-no-files-found: error
+
+  release:
+    needs: [ build-win, version ]
+    if: github.event.inputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      
+      - name: Create release package
+        run: |
+          zip -r -9 ${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip ${{ needs.version.outputs.DIST_EXE }}-d3d-x86_64-full/*
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          name: wiliwili ${{ github.event.inputs.version }}
+          tag: ${{ github.event.inputs.version }}
+          omitBodyDuringUpdate: true
+          body: Windows 64-bit build of wiliwili (with all required DLLs)
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip
