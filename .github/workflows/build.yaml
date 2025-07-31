@@ -77,11 +77,11 @@ jobs:
             ${MINGW_PACKAGE_PREFIX}-gcc \
             ${MINGW_PACKAGE_PREFIX}-ninja \
             ${MINGW_PACKAGE_PREFIX}-cmake \
-            ${MINGW_PACKAGE_PREFIX}-curl \
             ${MINGW_PACKAGE_PREFIX}-toolchain \
             ${MINGW_PACKAGE_PREFIX}-ntldd-git \
             ${MINGW_PACKAGE_PREFIX}-openssl \
-            unzip  # 移除了不存在的 ${MINGW_PACKAGE_PREFIX}-libcurl
+            ${MINGW_PACKAGE_PREFIX}-curl \
+            unzip
       
       - name: Install dependencies
         run: |
@@ -112,10 +112,7 @@ jobs:
             -DPLATFORM_DESKTOP=ON \
             -DWIN32_TERMINAL=OFF \
             -DUSE_SYSTEM_CURL=ON \
-            -DCPR_FORCE_WINSSL_BACKEND=OFF \
             -DCPR_USE_SYSTEM_CURL=ON \
-            -DCURL_INCLUDE_DIR=${CURL_INCLUDE_DIR} \
-            -DCURL_LIBRARY=${CURL_LIBRARY} \
             -DUSE_LIBROMFS=ON \
             -DBRLS_UNITY_BUILD=${{ github.event.inputs.disable_unity_build == 'true' && 'OFF' || 'ON' }} \
             -DCMAKE_UNITY_BUILD_BATCH_SIZE=20 \
@@ -135,38 +132,49 @@ jobs:
           cp build/wiliwili.pdb dist/
           cp README.md dist/
 
-          # 核心依赖
-          CORE_DLLS=(
-            libcurl-4.dll libcrypto-3-x64.dll libssl-3-x64.dll
-            libbrotlidec.dll libbrotlicommon.dll libiconv-2.dll
-            libidn2-0.dll libintl-8.dll libunistring-5.dll
-            libnghttp2-14.dll libnghttp3-9.dll libngtcp2-16.dll
-            libngtcp2_crypto_ossl.dll libpsl-5.dll libssh2-1.dll
-            libzstd.dll zlib1.dll libmpv-2.dll
-            libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
+          # 关键修改：完整的依赖DLL列表
+          REQUIRED_DLLS=(
+            libssl-3-x64.dll
+            libcrypto-3-x64.dll
+            libcurl-4.dll
+            libbrotlidec.dll
+            libbrotlicommon.dll
+            libiconv-2.dll
+            libidn2-0.dll
+            libintl-8.dll
+            libunistring-5.dll
+            libnghttp2-14.dll
+            libnghttp3-9.dll
+            libngtcp2-16.dll
+            libngtcp2_crypto_ossl.dll
+            libpsl-5.dll
+            libssh2-1.dll
+            libzstd.dll
+            zlib1.dll
+            libmpv-2.dll
+            libgcc_s_seh-1.dll
+            libstdc++-6.dll
+            libwinpthread-1.dll
           )
 
-          for dll in "${CORE_DLLS[@]}"; do
+          for dll in "${REQUIRED_DLLS[@]}"; do
             if [ -f "${MINGW_PREFIX}/bin/${dll}" ]; then
               cp "${MINGW_PREFIX}/bin/${dll}" dist/
             else
-              echo "::warning::DLL not found: ${dll}"
+              echo "::warning::Missing DLL: ${dll}"
             fi
           done
 
-          # 添加CA证书以解决TLS证书验证问题
-          curl -LO https://curl.se/ca/cacert.pem
-          cp cacert.pem dist/
+          # 新增CA证书
+          curl -L -o dist/cacert.pem https://curl.se/ca/cacert.pem
 
-          # 额外验证
-          if ! [ -f "dist/libcurl-4.dll" ]; then
-            echo "::error::libcurl-4.dll is missing!"
+          # 验证关键文件
+          if ! [ -f "dist/libssl-3-x64.dll" ]; then
+            echo "::error::libssl-3-x64.dll is missing!"
             exit 1
           fi
-
-          # 验证OpenSSL DLLs
-          if ! [ -f "dist/libcrypto-3-x64.dll" ] || ! [ -f "dist/libssl-3-x64.dll" ]; then
-            echo "::error::OpenSSL DLLs are missing!"
+          if ! [ -f "dist/libcrypto-3-x64.dll" ]; then
+            echo "::error::libcrypto-3-x64.dll is missing!"
             exit 1
           fi
       
