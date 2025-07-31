@@ -1,4 +1,4 @@
-name: Build wiliwili (Windows 64-bit with all DLLs)
+name: 构建 wiliwili (Windows 64位)
 
 on:
   push:
@@ -7,17 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'Push a new release'
+        description: '发布新版本'
         required: false
         default: 'false'
       version:
-        description: 'Version'
+        description: '版本号'
         required: false
         default: '0.0.0'
-      disable_unity_build:
-        description: 'Disable unity build'
-        required: false
-        default: 'false'
 
 jobs:
   version:
@@ -26,27 +22,20 @@ jobs:
       version: ${{ steps.info.outputs.version }}
       DIST_EXE: ${{ steps.info.outputs.DIST_EXE }}
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Debug version
-        run: |
-          export VERSION=$(git rev-parse --short HEAD)
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-
-      - name: Release version
-        if: github.event.inputs.release == 'true' && github.event.inputs.release != 'false' && !cancelled()
-        run: |
-          export VERSION="${{ github.event.inputs.version }}"
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-
-      - name: Version
+      - name: 设置版本号
         id: info
-        env:
-          VERSION: ${{ env.VERSION }}
         run: |
+          if [[ "${{ github.event.inputs.release }}" == "true" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=$(git rev-parse --short HEAD)
+          fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "DIST_EXE=wiliwili-Windows-${VERSION}" >> $GITHUB_OUTPUT
 
@@ -56,180 +45,89 @@ jobs:
     strategy:
       matrix:
         include:
-          - { arch: x86_64, msystem: MINGW64, driver: d3d, cmake: "-DUSE_D3D11=ON" }
-    env:
-      MSYSTEM: ${{ matrix.msystem }}
-      MSYS2_PATH_TYPE: inherit
+          - { arch: x86_64, msystem: MINGW64 }
     defaults:
       run:
-        shell: C:\shells\msys2bash.cmd {0}
+        shell: cmd /C "C:\msys64\msys2_shell.cmd -mingw64 -no-start -here -c '{0}'"
     steps:
-      - name: Checkout
+      - name: 设置MSYS2环境
+        run: |
+          # 确保MSYS2已安装
+          if not exist "C:\msys64" (
+            echo "::error::MSYS2未安装在默认位置"
+            exit 1
+          )
+
+          # 更新包数据库
+          C:\msys64\usr\bin\pacman.exe --noconfirm -Syu
+          C:\msys64\usr\bin\pacman.exe --noconfirm -Syuu
+
+          # 安装基础工具链
+          C:\msys64\usr\bin\pacman.exe --noconfirm -S --needed \
+            mingw-w64-x86_64-toolchain \
+            mingw-w64-x86_64-cmake \
+            mingw-w64-x86_64-ninja \
+            mingw-w64-x86_64-ccache \
+            git \
+            make \
+            patch
+
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
-      
-      - name: Check network connectivity
+
+      - name: 安装依赖项
         run: |
-          echo "Testing network connections..."
-          curl -v https://github.com
-          curl -v https://api.github.com
-          curl -v https://raw.githubusercontent.com
-      
-      - name: Setup MSYS2 with SSL dependencies
+          # 安装构建依赖
+          C:\msys64\usr\bin\pacman.exe --noconfirm -S --needed \
+            mingw-w64-x86_64-curl \
+            mingw-w64-x86_64-openssl \
+            mingw-w64-x86_64-zlib \
+            mingw-w64-x86_64-libssh2
+
+          # 下载CA证书
+          curl -L -o cacert.pem https://curl.se/ca/cacert.pem
+
+      - name: 配置构建系统
         run: |
-          # 升级基础系统
-          pacman --noconfirm -Syuu --ignore=pacman || true
-          pacman --noconfirm -Syuu --ignore=pacman
+          mkdir -p build
+          cd build
           
-          # 安装必要的包
-          echo "Installing base packages..."
-          pacman --noconfirm -S --needed --noprogressbar \
-            ${MINGW_PACKAGE_PREFIX}-gcc \
-            ${MINGW_PACKAGE_PREFIX}-ninja \
-            ${MINGW_PACKAGE_PREFIX}-cmake \
-            ${MINGW_PACKAGE_PREFIX}-curl \
-            ${MINGW_PACKAGE_PREFIX}-toolchain \
-            ${MINGW_PACKAGE_PREFIX}-ntldd-git \
-            ${MINGW_PACKAGE_PREFIX}-openssl \
-            ${MINGW_PACKAGE_PREFIX}-ca-certificates \
-            ${MINGW_PACKAGE_PREFIX}-libcrypt \
-            unzip
-          
-          # 验证安装结果
-          echo "Installed OpenSSL version:"
-          ${MINGW_PREFIX}/bin/openssl version
-          
-          # 更新证书信任库
-          update-ca-trust
-      
-      - name: Install dependencies
-        run: |
-          # 安装mpv
-          echo "Downloading mpv package..."
-          curl -LO https://github.com/xfangfang/wiliwili/releases/download/v0.1.0/${MINGW_PACKAGE_PREFIX}-mpv-0.39.0-4-any.pkg.tar.zst
-          
-          # 验证下载完整性
-          if [ ! -f "${MINGW_PACKAGE_PREFIX}-mpv-0.39.0-4-any.pkg.tar.zst" ]; then
-            echo "::error::Failed to download mpv package"
-            exit 1
-          fi
-          
-          echo "Installing mpv..."
-          pacman -U --noconfirm *.pkg.tar.zst
-          
-          # 安装cv2pdb
-          echo "Downloading cv2pdb..."
-          curl -LO https://github.com/rainers/cv2pdb/releases/download/v0.52/cv2pdb-0.52.zip
-          
-          # 验证下载完整性
-          if [ ! -f "cv2pdb-0.52.zip" ]; then
-            echo "::error::Failed to download cv2pdb"
-            exit 1
-          fi
-          
-          unzip cv2pdb-0.52.zip cv2pdb64.exe -d /usr/bin
-      
-      - name: Patch tweeny CMakeLists
-        run: |
-          sed -i 's/cmake_minimum_required(VERSION 2.8)/cmake_minimum_required(VERSION 3.5)/' library/borealis/library/lib/extern/tweeny/CMakeLists.txt
-      
-      - name: Update gamepad db
-        run: |
-          BRLS_GLFW=library/borealis/library/lib/extern/glfw
-          cmake -P ${BRLS_GLFW}/CMake/GenerateMappings.cmake ${BRLS_GLFW}/src/mappings.h.in ${BRLS_GLFW}/src/mappings.h
-      
-      - name: Build with dynamic OpenSSL
-        run: |
-          export CURL_INCLUDE_DIR=${MINGW_PREFIX}/include
-          export CURL_LIBRARY=${MINGW_PREFIX}/lib/libcurl.a
-          
-          # 动态链接 OpenSSL
-          export OPENSSL_ROOT_DIR=${MINGW_PREFIX}
-          
-          cmake -B build -G Ninja ${{ matrix.cmake }} \
+          # 显示工具版本
+          gcc --version
+          cmake --version
+          ninja --version
+
+          cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DPLATFORM_DESKTOP=ON \
-            -DWIN32_TERMINAL=OFF \
+            -DUSE_D3D11=ON \
             -DUSE_SYSTEM_CURL=ON \
             -DCPR_FORCE_OPENSSL_BACKEND=ON \
-            -DCPR_USE_SYSTEM_CURL=ON \
-            -DCURL_INCLUDE_DIR=${CURL_INCLUDE_DIR} \
-            -DCURL_LIBRARY=${CURL_LIBRARY} \
-            -DUSE_LIBROMFS=ON \
-            -DBRLS_UNITY_BUILD=${{ github.event.inputs.disable_unity_build == 'true' && 'OFF' || 'ON' }} \
-            -DCMAKE_UNITY_BUILD_BATCH_SIZE=20 \
-            -DZLIB_USE_STATIC_LIBS=ON \
-            -DMPV_BUNDLE_DLL=${MINGW_PREFIX}/bin/libmpv-2.dll \
-            -DVERSION_BUILD=${{ github.run_number }} \
-            -DCMAKE_POLICY_DEFAULT_CMP0048=NEW \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR}
-          
-          cmake --build build
-          cv2pdb64 build/wiliwili.exe
-      
-      - name: Debug dependencies
+            -DOPENSSL_ROOT_DIR=/mingw64 \
+            -DCMAKE_VERBOSE_MAKEFILE=ON
+
+      - name: 构建项目
         run: |
-          echo "OpenSSL details:"
-          openssl version -a
-          which openssl
-          
-          echo "Dependency check for wiliwili.exe:"
-          ntldd build/wiliwili.exe | grep -iE "ssl|crypto|curl"
-      
-      - name: Collect all files with SSL support
+          cd build
+          cmake --build . --parallel
+
+      - name: 打包发布文件
         run: |
           mkdir -p dist
           cp build/wiliwili.exe dist/
-          cp build/wiliwili.pdb dist/
-          cp README.md dist/
+          cp cacert.pem dist/
 
-          # 核心依赖
-          CORE_DLLS=(
-            libcurl-4.dll libcrypto-3-x64.dll libssl-3-x64.dll
-            libbrotlidec.dll libbrotlicommon.dll libiconv-2.dll
-            libidn2-0.dll libintl-8.dll libunistring-5.dll
-            libnghttp2-14.dll libnghttp3-9.dll libngtcp2-16.dll
-            libngtcp2_crypto_ossl.dll libpsl-5.dll libssh2-1.dll
-            libzstd.dll zlib1.dll libmpv-2.dll
-            libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
-          )
+          # 收集依赖
+          /mingw64/bin/ntldd -R dist/wiliwili.exe | grep -i mingw64 | awk '{print $3}' | xargs -I{} cp {} dist/
 
-          echo "Collecting required DLLs..."
-          for dll in "${CORE_DLLS[@]}"; do
-            DLL_PATH="${MINGW_PREFIX}/bin/${dll}"
-            if [ -f "${DLL_PATH}" ]; then
-              cp "${DLL_PATH}" dist/
-              echo "Copied: ${dll}"
-            else
-              echo "::warning::DLL not found: ${dll}"
-            fi
-          done
-
-          # 额外验证
-          REQUIRED_DLLS=(libcurl-4.dll libssl-3-x64.dll libcrypto-3-x64.dll)
-          for dll in "${REQUIRED_DLLS[@]}"; do
-            if [ ! -f "dist/${dll}" ]; then
-              echo "::error::Critical DLL missing: ${dll}"
-              exit 1
-            fi
-          done
-
-          # 复制 SSL 证书目录
-          mkdir -p dist/etc
-          cp -r ${MINGW_PREFIX}/etc/ssl dist/etc/
-          
-          # 输出最终 dist 目录内容
-          echo "Contents of dist directory:"
-          ls -la dist/
-      
-      - name: Upload artifact
+      - name: 上传制品
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ needs.version.outputs.DIST_EXE }}-${{ matrix.driver }}-${{ matrix.arch }}-full
+          name: ${{ needs.version.outputs.DIST_EXE }}
           path: dist/*
+          retention-days: 5
 
   release:
     needs: [ build-win, version ]
@@ -237,17 +135,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-      
-      - name: Create release package
-        run: |
-          zip -r -9 ${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip ${{ needs.version.outputs.DIST_EXE }}-d3d-x86_64-full/*
-
-      - name: Create Release
-        uses: ncipollo/release-action@v1
         with:
-          name: wiliwili ${{ github.event.inputs.version }}
-          tag: ${{ github.event.inputs.version }}
-          omitBodyDuringUpdate: true
-          body: Windows 64-bit build of wiliwili (with TLS/SSL fixes)
-          token: ${{ secrets.GITHUB_TOKEN }}
-          artifacts: ${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip
+          pattern: ${{ needs.version.outputs.DIST_EXE }}*
+          merge-multiple: true
+
+      - name: 创建发布包
+        run: |
+          mkdir -p release
+          mv ${{ needs.version.outputs.DIST_EXE }}* release/
+          cd release
+          zip -r9 ../${{ needs.version.outputs.DIST_EXE }}.zip *
+
+      - name: 发布版本
+        uses: softprops/action-gh-release@v1
+        with:
+          name: v${{ github.event.inputs.version }}
+          tag_name: v${{ github.event.inputs.version }}
+          body: Windows 64位构建版本
+          files: ${{ needs.version.outputs.DIST_EXE }}.zip
+          draft: false
+          prerelease: false
