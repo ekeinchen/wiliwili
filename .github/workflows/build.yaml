@@ -1,123 +1,85 @@
-name: wiliwili Windows Build
+name: wiliwili Windows Build (Fixed MSYS2)
 
 on:
-  # 自动触发条件（修复版）
+  workflow_dispatch:  # 保留手动触发
   push:
-    branches: [ main, master, dev ]  # 监听所有常用默认分支
-    paths:                          # 只有这些文件变化时才触发
+    branches: [ main, master ]
+    paths:
       - '**.cpp'
       - '**.hpp'
       - '**.h'
       - 'CMakeLists.txt'
-      - '!docs/**'                  # 忽略文档目录
-  pull_request:
-    branches: [ main, master ]      # PR 到这些分支时触发
-  # 手动触发选项
-  workflow_dispatch:
-    inputs:
-      skip-tests:
-        description: 'Skip test cases'
-        required: false
-        default: 'false'
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.set-version.outputs.version }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Set build version
-        id: set-version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=manual-${{ github.run_id }}" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "version=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          fi
-
   build-windows:
-    needs: setup
     runs-on: windows-2022
+    defaults:
+      run:
+        shell: cmd  # 关键修复：使用 Windows 原生 shell
     env:
       MSYSTEM: MINGW64
       MSYS2_PATH_TYPE: inherit
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      CHOCOLATEY_NO_PROMPT: 1
 
-      - name: Setup MSYS2
-        shell: msys2 {0}
-        run: |
-          # 更新基础系统
-          pacman -Syuu --noconfirm --needed
-          # 安装编译工具链
+    steps:
+    - name: Setup MSYS2
+      run: |
+        # 安装 Chocolatey (Windows 包管理器)
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        
+        # 通过 Chocolatey 安装 MSYS2
+        choco install msys2 -y --params="/NoUpdate"
+        refreshenv
+
+    - name: Set up MSYS2 environment
+      run: |
+        # 初始化 MSYS2
+        C:\tools\msys64\usr\bin\bash -lc "pacman -Syu --noconfirm"
+        C:\tools\msys64\usr\bin\bash -lc "pacman -S --needed --noconfirm base-devel mingw-w64-x86_64-toolchain"
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        C:\tools\msys64\usr\bin\bash -lc "
           pacman -S --noconfirm --needed \
-            mingw-w64-x86_64-toolchain \
             mingw-w64-x86_64-cmake \
             mingw-w64-x86_64-ninja \
             mingw-w64-x86_64-curl \
-            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-openssl \
+            mingw-w64-x86_64-ffmpeg
+        "
 
-      - name: Install dependencies
-        shell: msys2 {0}
-        run: |
-          # 安装多媒体组件
-          pacman -S --noconfirm --needed \
-            mingw-w64-x86_64-ffmpeg \
-            mingw-w64-x86_64-mpv
-
-      - name: Configure build
-        shell: msys2 {0}
-        run: |
-          mkdir build && cd build
+    - name: Configure build
+      run: |
+        C:\tools\msys64\usr\bin\bash -lc "
+          mkdir -p build && cd build
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DOPENSSL_ROOT_DIR=${MINGW_PREFIX} \
-            -DCURL_USE_OPENSSL=ON \
+            -DCMAKE_MAKE_PROGRAM=ninja \
             ..
+        "
 
-      - name: Build project
-        shell: msys2 {0}
-        run: |
+    - name: Build project
+      run: |
+        C:\tools\msys64\usr\bin\bash -lc "
           cd build
           ninja
+        "
 
-      - name: Collect binaries
-        shell: bash
-        run: |
-          mkdir -p package
-          cp build/wiliwili.exe package/
-          cp ${MINGW_PREFIX}/bin/*.dll package/
+    - name: Collect binaries
+      run: |
+        mkdir package
+        copy build\wiliwili.exe package
+        copy C:\tools\msys64\mingw64\bin\*.dll package
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wiliwili-${{ needs.setup.outputs.version }}-windows
-          path: package/*
-
-  deploy:
-    needs: build-windows
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: wiliwili-${{ needs.setup.outputs.version }}-windows
-
-      - name: Create release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.setup.outputs.version }}
-          files: |
-            wiliwili-${{ needs.setup.outputs.version }}-windows/*
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: wiliwili-windows-build
+        path: package/*
