@@ -1,35 +1,111 @@
-release:
-  needs: [ build-win, version ]
-  if: github.event.inputs.release == 'true'
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/download-artifact@v4
-      with:
-        name: ${{ needs.version.outputs.DIST_EXE }}-${{ matrix.driver }}-${{ matrix.arch }}-full
+name: wiliwili Windows Build (Auto ZIP)
 
-    - name: Create ZIP package
-      run: |
-        # 确保目录存在
-        ARTIFACT_DIR="${{ needs.version.outputs.DIST_EXE }}-d3d-x86_64-full"
-        if [ ! -d "$ARTIFACT_DIR" ]; then
-          echo "::error::Directory $ARTIFACT_DIR not found!"
-          exit 1
-        fi
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create release package'
+        required: false
+        default: 'true'
+      version:
+        description: 'Version tag'
+        required: false
+        default: 'nightly'
 
-        # 压缩所有文件
-        cd "$ARTIFACT_DIR"
-        zip -r ../${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip *
-        cd ..
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+      zip_name: ${{ steps.set-version.outputs.zip_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-        # 验证ZIP是否生成
-        if [ ! -f "${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip" ]; then
-          echo "::error::Failed to create ZIP file!"
-          exit 1
-        fi
+      - name: Set version
+        id: set-version
+        run: |
+          if [[ "${{ github.event.inputs.release }}" == "true" ]]; then
+            echo "version=${{ github.event.inputs.version || 'nightly' }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+          echo "zip_name=wiliwili-${{ github.event.inputs.version || 'nightly' }}-win64.zip" >> $GITHUB_OUTPUT
 
-    - name: Create Release
-      uses: ncipollo/release-action@v1
-      with:
-        name: wiliwili ${{ github.event.inputs.version }}
-        tag: ${{ github.event.inputs.version }}
-        artifacts: ${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip
+  build:
+    needs: version
+    runs-on: windows-2022
+    env:
+      MSYSTEM: MINGW64
+      MSYS2_PATH_TYPE: inherit
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2
+        shell: cmd
+        run: |
+          choco install msys2 -y --params="/NoUpdate"
+          setx PATH "%PATH%;C:\tools\msys64\usr\bin"
+          C:\tools\msys64\usr\bin\bash -lc "pacman -Syu --noconfirm"
+          C:\tools\msys64\usr\bin\bash -lc "pacman -S --needed --noconfirm mingw-w64-x86_64-toolchain"
+
+      - name: Install dependencies
+        shell: cmd
+        run: |
+          C:\tools\msys64\usr\bin\bash -lc "
+            pacman -S --noconfirm --needed \
+              mingw-w64-x86_64-cmake \
+              mingw-w64-x86_64-ninja \
+              mingw-w64-x86_64-curl \
+              mingw-w64-x86_64-openssl \
+              mingw-w64-x86_64-ffmpeg \
+              mingw-w64-x86_64-mpv
+          "
+
+      - name: Build
+        shell: cmd
+        run: |
+          C:\tools\msys64\usr\bin\bash -lc "
+            mkdir -p build && cd build
+            cmake -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DOPENSSL_ROOT_DIR=${MINGW_PREFIX} \
+              -DCURL_USE_OPENSSL=ON \
+              ..
+            ninja
+          "
+
+      - name: Collect binaries
+        shell: cmd
+        run: |
+          mkdir package
+          copy build\wiliwili.exe package
+          robocopy C:\tools\msys64\mingw64\bin package *.dll /njh /njs /ndl /nc /ns
+
+      - name: Create ZIP package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.version.outputs.zip_name }}
+          path: package/*
+          retention-days: 1
+
+  release:
+    needs: [build, version]
+    if: ${{ github.event.inputs.release == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.version.outputs.zip_name }}
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          files: ${{ needs.version.outputs.zip_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
