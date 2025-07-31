@@ -60,10 +60,10 @@ jobs:
     env:
       MSYSTEM: ${{ matrix.msystem }}
       MSYS2_PATH_TYPE: inherit
-      CHERE_INVOKING: 1  # 防止MSYS2修改工作目录
+      CHERE_INVOKING: 1
     defaults:
       run:
-        shell: msys2 {0} -c  # 使用标准MSYS2 shell
+        shell: cmd /c "call C:\msys64\msys2_shell.cmd -mingw64 -no-start -here -c \"{0}\"" 
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -71,88 +71,72 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       
-      - name: 设置MSYS2环境
+      - name: 初始化MSYS2
         run: |
-          # 更新基础系统
+          set MSYS=winsymlinks:nativestrict
           pacman --noconfirm -Syuu --overwrite '*' --ignore=pacman,msys2-runtime
-          pacman --noconfirm -Syu  # 二次更新确保完全升级
-          
-          # 安装必要工具链
+          pacman --noconfirm -Syu
+      
+      - name: 安装构建工具链
+        run: |
           pacman --noconfirm -S --needed \
-            ${MINGW_PACKAGE_PREFIX}-toolchain \
-            ${MINGW_PACKAGE_PREFIX}-cmake \
-            ${MINGW_PACKAGE_PREFIX}-ninja \
-            ${MINGW_PACKAGE_PREFIX}-git \
-            ${MINGW_PACKAGE_PREFIX}-curl \
-            ${MINGW_PACKAGE_PREFIX}-openssl \
-            ${MINGW_PACKAGE_PREFIX}-ca-certificates \
+            mingw-w64-x86_64-toolchain \
+            mingw-w64-x86_64-cmake \
+            mingw-w64-x86_64-ninja \
+            mingw-w64-x86_64-curl \
+            mingw-w64-x86_64-openssl \
+            mingw-w64-x86_64-ca-certificates \
             unzip
       
-      - name: 安装依赖项
+      - name: 安装mpv和cv2pdb
         run: |
-          # 安装mpv
-          curl -L -o mpv.pkg.tar.zst https://github.com/xfangfang/wiliwili/releases/download/v0.1.0/${MINGW_PACKAGE_PREFIX}-mpv-0.39.0-4-any.pkg.tar.zst
+          curl -L -o mpv.pkg.tar.zst https://github.com/xfangfang/wiliwili/releases/download/v0.1.0/mingw-w64-x86_64-mpv-0.39.0-4-any.pkg.tar.zst
           pacman --noconfirm -U mpv.pkg.tar.zst
-
-          # 安装cv2pdb
+          
           curl -L -o cv2pdb.zip https://github.com/rainers/cv2pdb/releases/download/v0.52/cv2pdb-0.52.zip
-          unzip -j cv2pdb.zip cv2pdb64.exe -d /usr/bin
+          unzip -j cv2pdb.zip cv2pdb64.exe -d /mingw64/bin
       
-      - name: 修补tweeny CMakeLists
+      - name: 构建准备
         run: |
           sed -i 's/cmake_minimum_required(VERSION 2.8)/cmake_minimum_required(VERSION 3.5)/' library/borealis/library/lib/extern/tweeny/CMakeLists.txt
-      
-      - name: 更新游戏手柄数据库
-        run: |
+          
           BRLS_GLFW=library/borealis/library/lib/extern/glfw
           cmake -P ${BRLS_GLFW}/CMake/GenerateMappings.cmake ${BRLS_GLFW}/src/mappings.h.in ${BRLS_GLFW}/src/mappings.h
       
-      - name: 构建项目
+      - name: 配置和构建
         env:
-          SSL_CERT_FILE: ${MINGW_PREFIX}/ssl/certs/ca-bundle.crt
-          PATH: ${MINGW_PREFIX}/bin:$PATH
+          SSL_CERT_FILE: /mingw64/ssl/certs/ca-bundle.crt
         run: |
-          # 设置构建环境
-          export CFLAGS="-O2 -pipe"
-          export CXXFLAGS="-O2 -pipe"
-          
-          # 创建构建目录
-          mkdir -p build && cd build
-          
-          # 配置CMake
+          mkdir build && cd build
           cmake .. -G Ninja ${{ matrix.cmake }} \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_INSTALL_PREFIX=${MINGW_PREFIX} \
+            -DCMAKE_INSTALL_PREFIX=/mingw64 \
             -DPLATFORM_DESKTOP=ON \
             -DWIN32_TERMINAL=OFF \
             -DUSE_SYSTEM_CURL=ON \
             -DCPR_FORCE_WINSSL_BACKEND=ON \
             -DUSE_LIBROMFS=ON \
             -DBRLS_UNITY_BUILD=${{ github.event.inputs.disable_unity_build == 'true' && 'OFF' || 'ON' }} \
-            -DMPV_BUNDLE_DLL=${MINGW_PREFIX}/bin/libmpv-2.dll \
+            -DMPV_BUNDLE_DLL=/mingw64/bin/libmpv-2.dll \
             -DVERSION_BUILD=${{ github.run_number }}
           
-          # 执行构建
           cmake --build . --config RelWithDebInfo
           cv2pdb64 wiliwili.exe
           cp wiliwili.exe wiliwili.pdb ..
       
-      - name: 收集运行时文件
+      - name: 打包发布文件
         run: |
           mkdir -p dist
           cp build/wiliwili.exe build/wiliwili.pdb dist/
           cp README.md dist/
-
-          # 复制证书文件
+          
           mkdir -p dist/ssl/certs
-          cp ${MINGW_PREFIX}/ssl/certs/ca-bundle.crt dist/ssl/certs/
-
-          # 自动收集依赖的DLL
+          cp /mingw64/ssl/certs/ca-bundle.crt dist/ssl/certs/
+          
           for binary in dist/wiliwili.exe; do
-            ntldd -R $binary | grep -i mingw | awk '{print $3}' | xargs -I{} cp {} dist/
+            ntldd -R $binary | grep -i mingw64 | awk '{print $3}' | xargs -I{} cp {} dist/
           done
-
-          # 确保关键DLL存在
+          
           REQUIRED_DLLS=(
             libwinpthread-1.dll
             libgcc_s_seh-1.dll
@@ -164,11 +148,11 @@ jobs:
           
           for dll in "${REQUIRED_DLLS[@]}"; do
             if [ ! -f "dist/${dll}" ]; then
-              cp "${MINGW_PREFIX}/bin/${dll}" dist/
+              cp "/mingw64/bin/${dll}" dist/
             fi
           done
       
-      - name: 上传构建产物
+      - name: 上传制品
         uses: actions/upload-artifact@v4
         with:
           name: ${{ needs.version.outputs.DIST_EXE }}-${{ matrix.driver }}-${{ matrix.arch }}-full
@@ -185,7 +169,7 @@ jobs:
         run: |
           zip -r -9 ${{ needs.version.outputs.DIST_EXE }}-x86_64-full.zip ${{ needs.version.outputs.DIST_EXE }}-d3d-x86_64-full/*
 
-      - name: 创建GitHub发布
+      - name: 发布版本
         uses: ncipollo/release-action@v1
         with:
           name: wiliwili ${{ github.event.inputs.version }}
