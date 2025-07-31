@@ -13,11 +13,6 @@
             <HomeRecommends/>
         </Tab>
 
-        <Tab label="@i18n/wiliwili/home/hots/tab"
-             fontSize="22">
-            <HomeHots/>
-        </Tab>
-
         <Tab label="@i18n/wiliwili/home/bangumi/tab"
              fontSize="22">
             <HomeBangumi/>
