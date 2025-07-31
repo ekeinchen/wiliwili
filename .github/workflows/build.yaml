@@ -1,131 +1,118 @@
-name: wiliwili Windows Build (Auto + ZIP)
+name: wiliwili Windows Build (Stable)
 
 on:
-  # 自动触发条件（与原始配置一致）
   push:
     branches: [ main, master ]
-    paths:
-      - '**.cpp'
-      - '**.hpp'
-      - '**.h'
-      - 'CMakeLists.txt'
   pull_request:
     branches: [ main, master ]
-  # 保留手动触发选项
   workflow_dispatch:
     inputs:
       release:
         description: 'Create release package'
         required: false
         default: 'true'
-      version:
-        description: 'Version tag'
-        required: false
-        default: 'nightly'
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.set-version.outputs.version }}
-      zip_name: ${{ steps.set-version.outputs.zip_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set version
-        id: set-version
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version || 'nightly' }}" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "version=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          fi
-          echo "zip_name=wiliwili-${{ github.event.inputs.version || '$(git rev-parse --short HEAD)' }}-win64.zip" >> $GITHUB_OUTPUT
-
   build:
-    needs: version
     runs-on: windows-2022
     env:
       MSYSTEM: MINGW64
       MSYS2_PATH_TYPE: inherit
+      BUILD_DIR: ${{ github.workspace }}/build
+      SOURCE_DIR: ${{ github.workspace }}/src
+
     steps:
+      # 步骤1：检出代码到指定目录
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          path: 'src'  # 关键修复：明确指定检出目录
 
+      # 步骤2：设置MSYS2环境
       - name: Setup MSYS2
+        shell: powershell
         run: |
-          choco install msys2 -y --params="/NoUpdate"
-          refreshenv
-          C:\tools\msys64\usr\bin\bash -lc "pacman -Syu --noconfirm"
-          C:\tools\msys64\usr\bin\bash -lc "pacman -S --needed --noconfirm mingw-w64-x86_64-toolchain"
+          # 安装MSYS2
+          if (-not (Test-Path "C:\tools\msys64")) {
+            choco install msys2 -y --params="/NoUpdate"
+            refreshenv
+          }
+          
+          # 更新基础包
+          C:\tools\msys64\usr\bin\bash -lc "pacman -Syu --noconfirm --needed"
+          
+          # 安装编译工具链
+          C:\tools\msys64\usr\bin\bash -lc "
+            pacman -S --needed --noconfirm \
+              mingw-w64-x86_64-toolchain \
+              mingw-w64-x86_64-cmake \
+              mingw-w64-x86_64-ninja
+          "
 
+      # 步骤3：安装依赖库
       - name: Install dependencies
+        shell: powershell
         run: |
           C:\tools\msys64\usr\bin\bash -lc "
-            pacman -S --noconfirm --needed \
-              mingw-w64-x86_64-cmake \
-              mingw-w64-x86_64-ninja \
+            pacman -S --needed --noconfirm \
               mingw-w64-x86_64-curl \
               mingw-w64-x86_64-openssl \
               mingw-w64-x86_64-ffmpeg \
               mingw-w64-x86_64-mpv
           "
 
-      - name: Build
+      # 步骤4：验证目录结构
+      - name: Verify source tree
+        shell: bash
         run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ls -l "$GITHUB_WORKSPACE/src"
+          if [ ! -f "$GITHUB_WORKSPACE/src/CMakeLists.txt" ]; then
+            echo "::error::CMakeLists.txt not found!"
+            exit 1
+          fi
+
+      # 步骤5：构建项目（修复路径问题）
+      - name: Build project
+        shell: powershell
+        run: |
+          $buildArgs = @(
+            "-G Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DOPENSSL_ROOT_DIR=C:/tools/msys64/mingw64",
+            "-DCURL_USE_OPENSSL=ON",
+            "-S $env:SOURCE_DIR",
+            "-B $env:BUILD_DIR"
+          )
+          
           C:\tools\msys64\usr\bin\bash -lc "
-            mkdir -p build && cd build
-            cmake -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DOPENSSL_ROOT_DIR=${MINGW_PREFIX} \
-              -DCURL_USE_OPENSSL=ON \
-              ..
-            ninja
+            echo '=== Starting build ==='
+            cmake $($buildArgs -join ' ')
+            cmake --build $env:BUILD_DIR
           "
 
-      - name: Package binaries
-        shell: pwsh
+      # 步骤6：打包成果物
+      - name: Package artifacts
+        shell: powershell
         run: |
-          # 创建临时目录
-          $tempDir = "package_$([DateTime]::Now.Ticks)"
-          New-Item -ItemType Directory -Path $tempDir | Out-Null
+          $zipName = "wiliwili-$env:GITHUB_SHA.substring(0,7)-win64.zip"
+          $artifactDir = "$env:BUILD_DIR/package"
           
-          # 复制文件
-          Copy-Item build\wiliwili.exe $tempDir
-          Get-ChildItem C:\tools\msys64\mingw64\bin\*.dll | Copy-Item -Destination $tempDir
+          New-Item -ItemType Directory -Path $artifactDir -Force
+          Copy-Item "$env:BUILD_DIR/wiliwili.exe" $artifactDir
           
-          # 创建ZIP
-          Compress-Archive -Path "$tempDir\*" -DestinationPath $env:GITHUB_WORKSPACE\${{ needs.version.outputs.zip_name }} -Force
+          # 复制所有依赖DLL
+          Get-ChildItem "C:\tools\msys64\mingw64\bin\*.dll" | 
+            Where-Object { $_.Name -match 'lib(gcc|stdc\+\+|winpthread|curl|ssl|crypto|mpv|ffmpeg)' } |
+            Copy-Item -Destination $artifactDir
           
-          # 验证ZIP
-          if (-not (Test-Path $env:GITHUB_WORKSPACE\${{ needs.version.outputs.zip_name }})) {
-            Write-Error "Failed to create ZIP package"
-            exit 1
-          }
+          Compress-Archive -Path "$artifactDir\*" -DestinationPath $zipName
+          Write-Output "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
+      # 步骤7：上传成果物
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ needs.version.outputs.zip_name }}
-          path: ${{ needs.version.outputs.zip_name }}
-          retention-days: 1
-
-  release:
-    needs: [build, version]
-    if: ${{ github.event.inputs.release == 'true' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.version.outputs.zip_name }}
-
-      - uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.version.outputs.version }}
-          files: ${{ needs.version.outputs.zip_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 3
