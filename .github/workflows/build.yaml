@@ -81,8 +81,7 @@ jobs:
             ${MINGW_PACKAGE_PREFIX}-toolchain \
             ${MINGW_PACKAGE_PREFIX}-ntldd-git \
             ${MINGW_PACKAGE_PREFIX}-openssl \
-            ${MINGW_PACKAGE_PREFIX}-libcurl \
-            unzip
+            unzip  # 移除了不存在的 ${MINGW_PACKAGE_PREFIX}-libcurl
       
       - name: Install dependencies
         run: |
