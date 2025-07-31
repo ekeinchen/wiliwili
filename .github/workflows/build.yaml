@@ -1,4 +1,4 @@
-name: 构建 wiliwili (Windows 64位)
+name: Build wiliwili (Windows 64-bit with all DLLs)
 
 on:
   push:
@@ -7,13 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: '发布新版本'
+        description: 'Push a new release'
         required: false
         default: 'false'
       version:
-        description: '版本号'
+        description: 'Version'
         required: false
         default: '0.0.0'
+      disable_unity_build:
+        description: 'Disable unity build'
+        required: false
+        default: 'false'
 
 jobs:
   version:
@@ -22,110 +26,186 @@ jobs:
       version: ${{ steps.info.outputs.version }}
       DIST_EXE: ${{ steps.info.outputs.DIST_EXE }}
     steps:
-      - name: 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      - name: 设置版本号
-        id: info
+      - name: Debug version
         run: |
-          if [[ "${{ github.event.inputs.release }}" == "true" ]]; then
-            VERSION="${{ github.event.inputs.version }}"
-          else
-            VERSION=$(git rev-parse --short HEAD)
-          fi
+          export VERSION=$(git rev-parse --short HEAD)
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Release version
+        if: github.event.inputs.release == 'true' && github.event.inputs.release != 'false' && !cancelled()
+        run: |
+          export VERSION="${{ github.event.inputs.version }}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Version
+        id: info
+        env:
+          VERSION: ${{ env.VERSION }}
+        run: |
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "DIST_EXE=wiliwili-Windows-${VERSION}" >> $GITHUB_OUTPUT
 
   build-win:
     needs: [ version ]
     runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, msystem: MINGW64, driver: d3d, cmake: "-DUSE_D3D11=ON" }
+    env:
+      MSYSTEM: ${{ matrix.msystem }}
+      MSYS2_PATH_TYPE: inherit
+      SHELL_OPTS: "set -eo pipefail"
     defaults:
       run:
-        shell: cmd /C "C:\msys64\msys2_shell.cmd -mingw64 -no-start -here -c '{0}'"
-    steps:
-      - name: 初始化MSYS2
-        run: |
-          # 更新MSYS2
-          C:\msys64\usr\bin\pacman.exe --noconfirm -Syu
-          C:\msys64\usr\bin\pacman.exe --noconfirm -Syuu
-          
-          # 安装基础工具
-          C:\msys64\usr\bin\pacman.exe --noconfirm -S --needed \
-            mingw-w64-x86_64-toolchain \
-            mingw-w64-x86_64-cmake \
-            mingw-w64-x86_64-ninja \
-            mingw-w64-x86_64-curl \
-            mingw-w64-x86_64-openssl
+        shell: C:\shells\msys2bash.cmd -c "${{ env.SHELL_OPTS }}; $0" {0}
 
-      - name: 检出代码
+    steps:
+      - name: Checkout code and submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: 构建准备
+      - name: Verify submodules
         run: |
-          # 创建构建目录
+          if [ -n "$(git submodule status | grep -E '^-')" ]; then
+            echo "::error::Some submodules are missing!"
+            git submodule status
+            exit 1
+          fi
+
+      - name: Check network (skip ping, use curl only)
+        run: |
+          echo "=== Testing HTTPS/TLS (retry 3 times) ==="
+          # 移除 ping 检查（Windows runner 可能禁用 ICMP），改用 curl 重试机制
+          curl -v --retry 5 --retry-delay 3 https://github.com || { echo "::error::HTTPS to GitHub failed"; exit 1; }
+          curl -v --retry 5 --retry-delay 3 https://api.github.com || { echo "::error::HTTPS to GitHub API failed"; exit 1; }
+          
+          echo "=== Testing OpenSSL connection ==="
+          openssl s_client -connect github.com:443 -servername github.com < /dev/null || { echo "::error::OpenSSL connection failed"; exit 1; }
+
+      - name: Setup MSYS2 with mirror (faster downloads)
+        run: |
+          # 添加国内镜像加速（解决网络慢问题）
+          echo "Server = https://mirrors.tuna.tsinghua.edu.cn/msys2/mingw/x86_64" >> /etc/pacman.d/mingw64.db
+          echo "Server = https://mirrors.ustc.edu.cn/msys2/mingw/x86_64" >> /etc/pacman.d/mingw64.db
+          
+          echo "=== Updating MSYS2 ==="
+          pacman -Syy --noconfirm  # 强制刷新包缓存
+          pacman --noconfirm -Syuu --ignore=pacman || { echo "::error::First MSYS2 update failed"; exit 1; }
+          pacman --noconfirm -Syuu --ignore=pacman || { echo "::error::Second MSYS2 update failed"; exit 1; }
+          
+          echo "=== Installing required packages ==="
+          REQUIRED_PACKAGES=(
+            ${MINGW_PACKAGE_PREFIX}-gcc
+            ${MINGW_PACKAGE_PREFIX}-ninja
+            ${MINGW_PACKAGE_PREFIX}-cmake
+            ${MINGW_PACKAGE_PREFIX}-curl
+            ${MINGW_PACKAGE_PREFIX}-toolchain
+            ${MINGW_PACKAGE_PREFIX}-ntldd-git
+            ${MINGW_PACKAGE_PREFIX}-openssl
+            ${MINGW_PACKAGE_PREFIX}-ca-certificates
+            ${MINGW_PACKAGE_PREFIX}-libcrypt
+            unzip
+          )
+          
+          for pkg in "${REQUIRED_PACKAGES[@]}"; do
+            if ! pacman -Qi "${pkg}" &> /dev/null; then
+              echo "Installing ${pkg}..."
+              pacman --noconfirm -S --needed "${pkg}" || { echo "::error::Failed to install ${pkg}"; exit 1; }
+            fi
+          done
+
+      - name: Download dependencies with proxy fallback
+        run: |
+          # 设置超时和重试策略
+          export CURL_OPTS="--retry 5 --retry-delay 3 --connect-timeout 30"
+          
+          echo "=== Downloading mpv package ==="
+          MPV_URL="https://github.com/xfangfang/wiliwili/releases/download/v0.1.0/${MINGW_PACKAGE_PREFIX}-mpv-0.39.0-4-any.pkg.tar.zst"
+          curl -LO ${CURL_OPTS} "${MPV_URL}" || { echo "::error::Failed to download mpv"; exit 1; }
+          
+          echo "=== Installing mpv ==="
+          pacman -U --noconfirm *.pkg.tar.zst || { echo "::error::Failed to install mpv"; exit 1; }
+          
+          echo "=== Downloading cv2pdb ==="
+          CV2PDB_URL="https://github.com/rainers/cv2pdb/releases/download/v0.52/cv2pdb-0.52.zip"
+          curl -LO ${CURL_OPTS} "${CV2PDB_URL}" || { echo "::error::Failed to download cv2pdb"; exit 1; }
+          unzip -q cv2pdb-0.52.zip cv2pdb64.exe -d /usr/bin || { echo "::error::Failed to unzip cv2pdb"; exit 1; }
+
+      - name: Patch tweeny CMakeLists
+        run: |
+          TWEENY_CMAKE="library/borealis/library/lib/extern/tweeny/CMakeLists.txt"
+          if [ ! -f "${TWEENY_CMAKE}" ]; then
+            echo "::error::tweeny CMakeLists.txt not found"
+            exit 1
+          fi
+          sed -i 's/cmake_minimum_required(VERSION 2.8)/cmake_minimum_required(VERSION 3.5)/' "${TWEENY_CMAKE}" || exit 1
+
+      - name: Update gamepad database
+        run: |
+          BRLS_GLFW="library/borealis/library/lib/extern/glfw"
+          cmake -P ${BRLS_GLFW}/CMake/GenerateMappings.cmake ${BRLS_GLFW}/src/mappings.h.in ${BRLS_GLFW}/src/mappings.h || { echo "::error::Failed to generate mappings"; exit 1; }
+
+      - name: CMake configuration
+        run: |
+          rm -rf build || true
           mkdir -p build
           
-          # 下载CA证书
-          curl -L -o cacert.pem https://curl.se/ca/cacert.pem
-
-      - name: 配置项目
-        run: |
-          cd build
-          cmake .. -G Ninja \
+          cmake -B build -G Ninja ${{ matrix.cmake }} \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DUSE_D3D11=ON \
+            -DPLATFORM_DESKTOP=ON \
+            -DWIN32_TERMINAL=OFF \
             -DUSE_SYSTEM_CURL=ON \
             -DCPR_FORCE_OPENSSL_BACKEND=ON \
-            -DOPENSSL_ROOT_DIR=/mingw64
-
-      - name: 构建项目
-        run: |
-          cd build
-          cmake --build . --parallel
+            -DCPR_USE_SYSTEM_CURL=ON \
+            -DCURL_INCLUDE_DIR="${MINGW_PREFIX}/include" \
+            -DCURL_LIBRARY="${MINGW_PREFIX}/lib/libcurl.a" \
+            -DUSE_LIBROMFS=ON \
+            -DBRLS_UNITY_BUILD="${{ github.event.inputs.disable_unity_build == 'true' && 'OFF' || 'ON' }}" \
+            -DMPV_BUNDLE_DLL="${MINGW_PREFIX}/bin/libmpv-2.dll" \
+            -DVERSION_BUILD="${{ github.run_number }}"
           
-          # 确保构建成功
-          if not exist "wiliwili.exe" (
-            echo "::error::构建失败 - 未生成可执行文件"
+          if [ ! -f "build/build.ninja" ]; then
+            echo "::error::CMake failed to generate build files"
             exit 1
-          )
+          fi
 
-      - name: 打包发布文件
+      - name: Build
         run: |
-          # 创建dist目录
+          cmake --build build --verbose || { echo "::error::Build failed"; exit 1; }
+          if [ ! -f "build/wiliwili.exe" ]; then
+            echo "::error::Executable not generated"
+            exit 1
+          fi
+
+      - name: Collect DLLs
+        run: |
           mkdir -p dist
-          
-          # 复制可执行文件
           cp build/wiliwili.exe dist/
-          cp cacert.pem dist/
+          cp build/wiliwili.pdb dist/ 2>/dev/null || true
           
-          # 收集依赖
-          /mingw64/bin/ntldd -R dist/wiliwili.exe | grep -i mingw64 | awk '{print $3}' | while read -r dll; do
-            cp "$dll" dist/
-          done
-          
-          # 验证文件存在
-          if not exist "dist\wiliwili.exe" (
-            echo "::error::未找到可执行文件"
-            exit 1
+          CORE_DLLS=(
+            libcurl-4.dll libcrypto-3-x64.dll libssl-3-x64.dll
+            libmpv-2.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll
           )
           
-          # 列出dist目录内容
-          echo "=== dist目录内容 ==="
-          ls -la dist/
+          for dll in "${CORE_DLLS[@]}"; do
+            DLL_PATH="${MINGW_PREFIX}/bin/${dll}"
+            [ -f "${DLL_PATH}" ] && cp "${DLL_PATH}" dist/ || { echo "::error::Missing ${dll}"; exit 1; }
+          done
 
-      - name: 上传制品
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ needs.version.outputs.DIST_EXE }}
+          name: ${{ needs.version.outputs.DIST_EXE }}-${{ matrix.driver }}-${{ matrix.arch }}-full
           path: dist/*
-          if-no-files-found: error
-          retention-days: 5
 
   release:
     needs: [ build-win, version ]
@@ -133,22 +213,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
+      
+      - name: Create release package
+        run: zip -r -9 ${{ needs.version.outputs.DIST_EXE }}.zip ${{ needs.version.outputs.DIST_EXE }}-*/*
+      
+      - name: Create Release
+        uses: ncipollo/release-action@v1
         with:
-          name: ${{ needs.version.outputs.DIST_EXE }}
-          
-      - name: 创建发布包
-        run: |
-          mkdir -p release
-          mv * release/
-          cd release
-          zip -r9 ../${{ needs.version.outputs.DIST_EXE }}.zip *
-          
-      - name: 发布版本
-        uses: softprops/action-gh-release@v1
-        with:
-          name: v${{ github.event.inputs.version }}
-          tag_name: v${{ github.event.inputs.version }}
-          body: Windows 64位构建版本
-          files: ${{ needs.version.outputs.DIST_EXE }}.zip
-          draft: false
-          prerelease: false
+          tag: ${{ github.event.inputs.version }}
+          artifacts: ${{ needs.version.outputs.DIST_EXE }}.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
